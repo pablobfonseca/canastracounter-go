@@ -29,7 +29,7 @@ func initDB() {
 	);
 	CREATE TABLE IF NOT EXISTS games (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		maximum_score INTEGER NOT NULL
+		max_points INTEGER NOT NULL
 	);
 	CREATE TABLE IF NOT EXISTS game_players (
 		game_id INTEGER NOT NULL,
@@ -51,8 +51,8 @@ type Player struct {
 }
 
 type Game struct {
-	ID           int    `json:"id"`
-	MaximumScore string `json:"maximum_score"`
+	ID        int    `json:"id"`
+	MaxPoints string `json:"max_points"`
 }
 
 type GamePlayer struct {
@@ -66,20 +66,43 @@ type Response struct {
 	Success bool   `json:"success"`
 }
 
+func openLogFile(logfile string) {
+	if logfile != "" {
+		lf, err := os.OpenFile(logfile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0640)
+		if err != nil {
+			log.Fatal("OpenLogfile: os.OpenFile:", err)
+		}
+		log.SetOutput(lf)
+	}
+}
+
+func logRequest(handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("%s %s %s\n", r.RemoteAddr, r.Method, r.URL)
+		handler.ServeHTTP(w, r)
+	})
+}
+
 func main() {
+	logPath := "development.log"
+	if PORT == "" {
+		PORT = "8080"
+	}
+
 	initDB()
 	defer db.Close()
 
-	server := &http.Server{
-		Addr: fmt.Sprintf(":%s", PORT),
-	}
+	mux := http.NewServeMux()
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(Response{"Player created", true})
+	openLogFile(logPath)
+	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(Response{"all good", true})
 	})
 
-	http.HandleFunc("/games/new", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/games/new", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
 		if r.Method != http.MethodPost {
@@ -89,7 +112,7 @@ func main() {
 		}
 
 		var requestData struct {
-			MaximumScore int `json:"maximum_score"`
+			MaxPoints int `json:"max_points"`
 		}
 
 		err := json.NewDecoder(r.Body).Decode(&requestData)
@@ -99,17 +122,15 @@ func main() {
 			return
 		}
 
-		result, err := db.Exec("INSERT INTO games (maximum_score) VALUES (?)", requestData.MaximumScore)
+		result, err := db.Exec("INSERT INTO games (max_points) VALUES (?)", requestData.MaxPoints)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(Response{"internal_server_error", false})
+			respondWithError(w, 500)
 			return
 		}
 
 		id, err := result.LastInsertId()
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(Response{"internal_server_error", false})
+			respondWithError(w, 500)
 			return
 		}
 
@@ -125,7 +146,7 @@ func main() {
 		json.NewEncoder(w).Encode(gameCreatedResponse)
 	})
 
-	http.HandleFunc("/games", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/games", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
 		if r.Method != http.MethodGet {
@@ -138,8 +159,7 @@ func main() {
 
 		rows, err := db.Query("SELECT game_id, player_id, score FROM game_players WHERE game_id = ?", id)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(Response{"internal_server_error", false})
+			respondWithError(w, 500)
 			return
 		}
 		defer rows.Close()
@@ -150,16 +170,14 @@ func main() {
 			gamePlayer := new(GamePlayer)
 			err := rows.Scan(&gamePlayer.GameId, &gamePlayer.PlayerId, &gamePlayer.Score)
 			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(Response{"internal_server_error", false})
+				respondWithError(w, 500)
 				return
 			}
 			gamePlayers = append(gamePlayers, *gamePlayer)
 		}
 
 		if err = rows.Err(); err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(Response{"internal_server_error", false})
+			respondWithError(w, 500)
 			return
 		}
 
@@ -171,7 +189,7 @@ func main() {
 		json.NewEncoder(w).Encode(gameResponse)
 	})
 
-	http.HandleFunc("/games/update-score", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/games/update-score", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
 		if r.Method != http.MethodPut {
@@ -195,8 +213,7 @@ func main() {
 
 		_, err = db.Exec("UPDATE game_players SET score = score + ? WHERE game_id = ? AND player_id = ?", requestData.Score, requestData.GameId, requestData.PlayerId)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(Response{"internal_server_error", false})
+			respondWithError(w, 500)
 			return
 		}
 
@@ -205,8 +222,7 @@ func main() {
 
 		err = row.Scan(&gamePlayer.Score)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(Response{"internal_server_error", false})
+			respondWithError(w, 500)
 			return
 		}
 
@@ -222,7 +238,7 @@ func main() {
 		json.NewEncoder(w).Encode(gameUpdatedResponse)
 	})
 
-	http.HandleFunc("/games/players/add", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/games/players/add", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
 		if r.Method != http.MethodPost {
@@ -245,15 +261,13 @@ func main() {
 
 		result, err := db.Exec("INSERT INTO game_players (player_id, game_id) VALUES (?, ?)", requestData.PlayerId, requestData.GameId)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(Response{"internal_server_error", false})
+			respondWithError(w, 500)
 			return
 		}
 
 		id, err := result.LastInsertId()
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(Response{"internal_server_error", false})
+			respondWithError(w, 500)
 			return
 		}
 
@@ -269,7 +283,7 @@ func main() {
 		json.NewEncoder(w).Encode(gamePlayersCreatedResponse)
 	})
 
-	http.HandleFunc("/players/add", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/players/add", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
 		if r.Method != http.MethodPost {
@@ -297,8 +311,7 @@ func main() {
 
 		result, err := db.Exec("INSERT INTO players (name) VALUES (?)", requestData.Name)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(Response{"internal_server_error", false})
+			respondWithError(w, 500)
 			return
 		}
 
@@ -316,6 +329,40 @@ func main() {
 		json.NewEncoder(w).Encode(userCreatedResponse)
 	})
 
+	middlewares := serverMiddlewares(mux, corsMiddleware, logRequest)
+
+	server := &http.Server{
+		Addr:    fmt.Sprintf(":%s", PORT),
+		Handler: middlewares,
+	}
+
 	log.Printf("Server running on port %s\n", PORT)
 	log.Fatal(server.ListenAndServe())
+}
+
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func serverMiddlewares(handler http.Handler, middlewares ...func(http.Handler) http.Handler) http.Handler {
+	for _, middleware := range middlewares {
+		handler = middleware(handler)
+	}
+	return handler
+}
+
+func respondWithError(w http.ResponseWriter, statusCode int) {
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(Response{Message: "internal_server_error", Success: false})
 }
